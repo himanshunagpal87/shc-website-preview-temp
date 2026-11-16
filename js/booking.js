@@ -1,5 +1,10 @@
-const SUPABASE_URL = "https://ycxuipirpyjadkavkcrf.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_kOEXCSZkqQMV0MJ8kaa1Gw_v_QaPTdm";
+const SUPABASE_URL = "https://upgtiqllmmrstrvmmarj.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InVwZ3RpcWxsbW1yc3Rydm1tYXJqIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTE3Mjg4MzcsImV4cCI6MjEwNzMwNDgzN30.dmRxNd_Fu2Bhj6ULtwUbD3J5yimKWTcVFAj63K_uG84";
+
+// Send how the visitor reached the site with each booking request. Keep this false until the
+// website_booking_requests table has the five source columns, or the request is rejected.
+const BOOKING_SOURCE_ENABLED = false;
+const track = (name, params) => { if (window.shcTrack) window.shcTrack(name, params); };
 
 const SERVICES = [
   { id: 1, name: "Manual Therapy" },
@@ -98,6 +103,7 @@ function initBookingForm() {
     sendCodeBtn.textContent = "Sending...";
     const result = await callRpc("request_phone_otp", { p_phone: cleanPhone });
     if (result.success) {
+      track("otp_requested");
       otpSection.style.display = "flex";
       otpStatus.textContent = "Code sent! It can take up to a minute to arrive on WhatsApp.";
       otpStatus.style.color = "";
@@ -189,6 +195,12 @@ function initBookingForm() {
       notes: data.notes ? data.notes.trim() : null,
       honeypot: data.honeypot || null,
     };
+    if (BOOKING_SOURCE_ENABLED) {
+      try {
+        const src = JSON.parse(sessionStorage.getItem("shc-source") || "{}");
+        for (const k of ["source", "medium", "campaign", "referrer", "landing_page"]) payload[k] = src[k] || null;
+      } catch (err) { /* no source recorded: send the request without one */ }
+    }
 
     submitBtn.disabled = true;
     submitBtn.textContent = "Sending...";
@@ -208,6 +220,7 @@ function initBookingForm() {
 
       msgEl.textContent = "Thank you! Your booking request has been received — you'll get a WhatsApp confirmation within a few minutes.";
       msgEl.className = "form-msg success";
+      track("booking_submitted");
       form.reset();
       resetVerification();
     } catch (err) {
@@ -252,6 +265,7 @@ function initGeneralContactForm() {
 
       msgEl.textContent = "Thank you! We've received your message and will get back to you soon.";
       msgEl.className = "form-msg success";
+      track("contact_form_submitted");
       form.reset();
     } catch (err) {
       msgEl.textContent = "Something went wrong. Please email info@shivwikholisticcare.com directly.";
@@ -289,7 +303,7 @@ async function initLiveHours() {
   if (!fullEls.length && !shortEls.length) return;
   try {
     const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/doctors?id=eq.1&select=available_days,start_time,end_time,saturday_start_time,saturday_end_time`,
+      `${SUPABASE_URL}/rest/v1/doctors?id=eq.1&select=available_days,start_time,end_time,saturday_start_time,saturday_end_time,evening_start_time,evening_end_time`,
       { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
     );
     if (!res.ok) return;
@@ -298,9 +312,12 @@ async function initLiveHours() {
 
     const weekdays = d.available_days.filter((x) => x !== "Sat" && x !== "Sun");
     const hasSat = d.available_days.includes("Sat") && d.saturday_start_time;
+    const hasEvening = weekdays.length && d.evening_start_time && d.evening_end_time;
     const closed = DAY_ORDER.filter((x) => !d.available_days.includes(x));
 
-    const line1 = `${formatDays(weekdays)}: ${fmtTime(d.start_time)}–${fmtTime(d.end_time)} (evenings by appointment)`;
+    const line1 = hasEvening
+      ? `${formatDays(weekdays)}: ${fmtTime(d.start_time)}–${fmtTime(d.end_time)} (Morning) · ${fmtTime(d.evening_start_time)}–${fmtTime(d.evening_end_time)} (Evening)`
+      : `${formatDays(weekdays)}: ${fmtTime(d.start_time)}–${fmtTime(d.end_time)} (evenings by appointment)`;
     const line2Parts = [];
     if (hasSat) line2Parts.push(`Saturday: ${fmtTime(d.saturday_start_time)}–${fmtTime(d.saturday_end_time)}`);
     if (closed.length) line2Parts.push(`${formatDays(closed, true)}: Closed`);
@@ -316,7 +333,7 @@ async function initLiveHours() {
 
     let short = `Regular hours: ${formatDays(weekdays)} ${fmtTime(d.start_time)}–${fmtTime(d.end_time)}`;
     if (hasSat) short += `, Sat ${fmtTime(d.saturday_start_time)}–${fmtTime(d.saturday_end_time)}`;
-    short += ". Evening slots by request.";
+    short += hasEvening ? `. Evening: ${fmtTime(d.evening_start_time)}–${fmtTime(d.evening_end_time)}.` : ". Evening slots by request.";
     shortEls.forEach((el) => { el.textContent = short; });
   } catch (err) {
     // keep the static fallback text already in the page
@@ -384,6 +401,9 @@ async function initArticles() {
     const rows = await sbGet("articles?select=slug,title,summary,type,body,publish_at,event_date&order=publish_at.desc&limit=60");
     const frag = document.createDocumentFragment();
     rows.forEach((a) => {
+      // Cards already written into the page by tools/build.mjs link to the real article pages;
+      // this only tops the list up with anything approved since the last build.
+      if (grid.querySelector(`[data-slug="${a.slug}"]`)) return;
       const card = document.createElement("a");
       card.className = "article-card";
       card.href = `article.html?slug=${encodeURIComponent(a.slug)}`;
@@ -411,8 +431,15 @@ async function initArticlePage() {
     root.innerHTML = `<p>Sorry, we couldn't find that article. It may have been moved or unpublished.</p>
       <p><a href="articles.html">&larr; See all articles</a></p>`;
     document.getElementById("articleTitle").textContent = "Article not found";
+    document.head.appendChild(Object.assign(document.createElement("meta"), { name: "robots", content: "noindex" }));
   };
   if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(slug)) return notFound();
+  // Old address: once tools/build.mjs has written the real page, name it as canonical and forward to it.
+  const canonical = document.head.appendChild(Object.assign(document.createElement("link"), { rel: "canonical", href: `https://www.shivwikholisticcare.com/articles/${slug}/` }));
+  try {
+    if ((await fetch(`articles/${slug}/`, { method: "HEAD" })).ok) return location.replace(`articles/${slug}/`);
+  } catch (err) { /* offline or not built yet: draw it here as before */ }
+  canonical.remove();
   try {
     const [a] = await sbGet(`articles?slug=eq.${slug}&select=slug,title,summary,type,body,publish_at,event_date,author_name&limit=1`);
     if (!a) return notFound();
@@ -491,7 +518,7 @@ async function initSpecialists() {
   if (!section) return;
   try {
     // Doctor #1 is the founder, featured separately on the page.
-    const rows = await sbGet("doctors?select=id,name,qualification,department,bio,available_days,start_time,end_time,saturday_start_time,saturday_end_time" +
+    const rows = await sbGet("doctors?select=id,name,qualification,department,bio,available_days,start_time,end_time,saturday_start_time,saturday_end_time,evening_start_time,evening_end_time" +
       "&is_active=eq.true&show_on_website=eq.true&id=neq.1&order=department,name");
     if (!rows.length) return;
     document.getElementById("specialistsGrid").innerHTML = rows.map((d) => {
@@ -499,6 +526,7 @@ async function initSpecialists() {
       const weekdays = days.filter((x) => x !== "Sat" && x !== "Sun");
       const parts = [];
       if (weekdays.length && d.start_time) parts.push(`${formatDays(weekdays)}: ${fmtTime(d.start_time)}–${fmtTime(d.end_time)}`);
+      if (weekdays.length && d.evening_start_time && d.evening_end_time) parts.push(`Evening: ${fmtTime(d.evening_start_time)}–${fmtTime(d.evening_end_time)}`);
       if (days.includes("Sat") && d.saturday_start_time) parts.push(`Sat: ${fmtTime(d.saturday_start_time)}–${fmtTime(d.saturday_end_time)}`);
       return `<div class="service-card specialist-card">
         <span class="specialist-dept">${escapeHtml(d.department || "Specialist")}</span>
@@ -557,60 +585,6 @@ async function initClosureBanner() {
   header.insertAdjacentElement("beforebegin", banner);
 }
 
-/* ---------------------------------------------------------------------
-   Secure report page (report.html?t=<token>). The report-access Edge
-   Function checks the token and the last 4 phone digits, then returns a
-   short-lived download link.
-   --------------------------------------------------------------------- */
-async function initReportPage() {
-  const form = document.getElementById("reportForm");
-  if (!form) return;
-  const token = (new URLSearchParams(location.search).get("t") || "").trim();
-  const msg = document.getElementById("reportMsg");
-  const btn = document.getElementById("reportBtn");
-  const input = document.getElementById("phoneLast4");
-  const showMsg = (text, isError) => { msg.textContent = text; msg.className = "form-msg" + (isError ? " error" : " success"); };
-
-  if (!/^[a-f0-9]{32,64}$/i.test(token)) {
-    input.disabled = true; btn.disabled = true;
-    showMsg("This report link is incomplete. Please open it exactly as received on WhatsApp, or ask the clinic to send it again.", true);
-    return;
-  }
-  input.addEventListener("input", () => { input.value = input.value.replace(/\D/g, "").slice(0, 4); });
-
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    if (!/^\d{4}$/.test(input.value)) return showMsg("Please enter the last 4 digits of your mobile number.", true);
-    btn.disabled = true; btn.textContent = "Checking…"; msg.textContent = ""; msg.className = "form-msg";
-    try {
-      const res = await fetch(`${SUPABASE_URL}/functions/v1/report-access`, {
-        method: "POST",
-        headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({ token, phone_last4: input.value }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.url) {
-        showMsg(data.message || "We couldn't open this report. Please contact the clinic.", true);
-        if (res.status === 423 || res.status === 410) input.disabled = true;
-        return;
-      }
-      form.hidden = true;
-      document.getElementById("reportHello").textContent = data.first_name ? `Hello ${data.first_name},` : "Hello,";
-      const when = data.created_at ? new Date(data.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric", timeZone: "Asia/Kolkata" }) : "";
-      document.getElementById("reportDetails").textContent = `Your ${data.report_type || "report"}${when ? " from " + when : ""} is ready.`;
-      document.getElementById("reportOpen").href = data.url;
-      document.getElementById("reportExpiry").textContent = data.url_valid_seconds
-        ? `For your privacy, this button works for ${Math.round(data.url_valid_seconds / 60)} minutes. If it stops working, simply reload this page and confirm your digits again.`
-        : "";
-      document.getElementById("reportResult").hidden = false;
-    } catch (err) {
-      showMsg("Connection problem. Please check your internet and try again.", true);
-    } finally {
-      btn.disabled = false; btn.textContent = "Open My Report";
-    }
-  });
-}
-
 function initArticleFilters() {
   const chips = document.querySelectorAll(".filter-chips .chip");
   const cards = document.querySelectorAll("#articlesGrid .article-card");
@@ -646,5 +620,4 @@ document.addEventListener("DOMContentLoaded", () => {
   initTestimonials();
   initSpecialists();
   initClosureBanner();
-  initReportPage();
 });
